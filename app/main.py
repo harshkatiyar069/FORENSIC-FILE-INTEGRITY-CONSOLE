@@ -1,0 +1,191 @@
+"""Command-line entry point. Run from the project root:
+
+    python -m app.main init <folder> [<folder> ...] [--note "text"]
+    python -m app.main scan
+    python -m app.main status
+    python -m app.main logs [--type TYPE] [--contains TEXT] [--limit N] [--export FILE]
+    python -m app.main verify-log
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from fim import database
+from fim.baseline import BaselineExistsError, create_initial_baseline
+from fim.config import DEFAULT_SETTINGS
+from fim.scan_service import NoBaselineError, ScanSummary, run_scan
+from fim.security_log import export_events, verify_chain
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    try:
+        summary = create_initial_baseline(
+            DEFAULT_SETTINGS.db_path,
+            [Path(p) for p in args.folders],
+            note=args.note,
+        )
+    except (FileNotFoundError, NotADirectoryError, BaselineExistsError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Baseline #{summary.baseline_id} created.")
+    print(f"  Files recorded : {summary.files_recorded}")
+    print(f"  Files skipped  : {summary.files_skipped}")
+    print(f"  Files failed   : {len(summary.files_failed)}")
+    for path, reason in summary.files_failed[:20]:
+        print(f"    - {path}: {reason}")
+    return 0
+
+
+def _short(digest: str | None) -> str:
+    return digest if digest else "-"
+
+
+def _print_change(c: dict) -> None:
+    kind = c["change_type"].upper()
+    if c["change_type"] == "renamed":
+        print(f"  [{kind}] {c['old_path']}")
+        print(f"      -> {c['path']}  ({c['detail']})")
+    elif c["change_type"] == "modified":
+        print(f"  [{kind}] {c['path']}")
+        print(f"      previous SHA-256: {_short(c['old_sha256'])}")
+        print(f"      current  SHA-256: {_short(c['new_sha256'])}")
+    else:
+        extra = f"  ({c['detail']})" if c["detail"] else ""
+        print(f"  [{kind}] {c['path']}{extra}")
+
+
+def _print_summary(summary: ScanSummary) -> None:
+    print(f"Scan #{summary.scan_id} against baseline #{summary.baseline_id} complete.")
+    print(f"  Files scanned : {summary.files_seen}")
+    print(f"  Skipped       : {summary.skipped}")
+    print(f"  Modified      : {summary.count('modified')}")
+    print(f"  New           : {summary.count('new')}")
+    print(f"  Deleted       : {summary.count('deleted')}")
+    print(f"  Renamed       : {summary.count('renamed')}")
+    print(f"  Metadata only : {summary.count('metadata')}")
+    print(f"  Unreadable    : {summary.count('unreadable')}")
+    if summary.changes:
+        print()
+        print("Details:")
+        for change in summary.changes:
+            _print_change(change)
+    else:
+        print("\nNo changes detected. Files match the trusted baseline.")
+
+
+def cmd_scan(_args: argparse.Namespace) -> int:
+    try:
+        summary = run_scan()
+    except (NoBaselineError, FileNotFoundError, NotADirectoryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    _print_summary(summary)
+    return 0
+
+
+def cmd_status(_args: argparse.Namespace) -> int:
+    conn = database.connect(DEFAULT_SETTINGS.db_path)
+    try:
+        baseline_id = database.latest_baseline_id(conn)
+        if baseline_id is None:
+            print("No baseline yet. Run: python -m app.main init <folder>")
+            return 0
+        files = database.load_baseline_files(conn, baseline_id)
+        print(f"Current baseline: #{baseline_id} ({len(files)} files)")
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    conn = database.connect(DEFAULT_SETTINGS.db_path)
+    try:
+        events = database.load_security_events(
+            conn,
+            event_type=args.type,
+            contains=args.contains,
+            limit=None if args.export else args.limit,
+            newest_first=True,
+        )
+    finally:
+        conn.close()
+    events.reverse()  # display in chronological order
+
+    if args.export:
+        try:
+            count = export_events(events, Path(args.export))
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        print(f"Exported {count} events to {args.export}")
+        return 0
+
+    if not events:
+        print("No matching events.")
+        return 0
+
+    for event in events:
+        details = json.loads(event["details"])
+        summary = ", ".join(
+            f"{key}={value}" for key, value in details.items()
+            if not isinstance(value, (list, dict))
+        )
+        print(f"#{event['id']:<4} {event['created_at']}  {event['event_type']:<18} {summary}")
+    return 0
+
+
+def cmd_verify(_args: argparse.Namespace) -> int:
+    conn = database.connect(DEFAULT_SETTINGS.db_path)
+    try:
+        report = verify_chain(conn)
+    finally:
+        conn.close()
+
+    if report.valid:
+        print(f"Log integrity OK: {report.events_checked} events verified.")
+        return 0
+
+    print(f"Log integrity FAILED at event #{report.broken_at_id}.", file=sys.stderr)
+    print(f"  Reason: {report.reason}", file=sys.stderr)
+    print(f"  Events checked: {report.events_checked}", file=sys.stderr)
+    return 2
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="fim", description="File Integrity Manager")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    init = sub.add_parser("init", help="create the initial trusted baseline")
+    init.add_argument("folders", nargs="+", help="folders to monitor")
+    init.add_argument("--note", default=None, help="optional description")
+    init.set_defaults(func=cmd_init)
+
+    scan = sub.add_parser("scan", help="compare current files with the baseline")
+    scan.set_defaults(func=cmd_scan)
+
+    status = sub.add_parser("status", help="show the current baseline")
+    status.set_defaults(func=cmd_status)
+
+    logs = sub.add_parser("logs", help="view or export the security log")
+    logs.add_argument("--type", default=None, help="filter by event type, e.g. scan_completed")
+    logs.add_argument("--contains", default=None, help="text to search for in event details")
+    logs.add_argument("--limit", type=int, default=20, help="show the newest N events")
+    logs.add_argument("--export", default=None, help="write matching events to a .csv or .json file")
+    logs.set_defaults(func=cmd_logs)
+
+    verify = sub.add_parser("verify-log", help="check that the security log has not been altered")
+    verify.set_defaults(func=cmd_verify)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
