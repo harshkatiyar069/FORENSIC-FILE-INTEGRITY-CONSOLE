@@ -252,4 +252,16 @@ def count_changes_by_type(conn: sqlite3.Connection, scan_id: int) -> dict[str, i
         "SELECT change_type, COUNT(*) FROM changes WHERE scan_id = ? GROUP BY change_type",
         (scan_id,),
     )
-    return {change_type: int(n) for change_type, n in cur.fetchall()}
+    return {change_type: int(n) for change_type, n in cur.fetchall()} 
+    
+
+def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT id, started_at, finished_at, baseline_id, files_seen, status "
+        "FROM scans WHERE id = ?",
+        (scan_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    keys = ("id", "started_at", "finished_at", "baseline_id", "files_seen", "status")
+    return dict(zip(keys, row)) 

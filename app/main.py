@@ -3,6 +3,7 @@
     python -m app.main init <folder> [<folder> ...] [--note "text"]
     python -m app.main scan
     python -m app.main status
+    python -m app.main report [--scan-id N] [--format csv|json|pdf|all]
     python -m app.main logs [--type TYPE] [--contains TEXT] [--limit N] [--export FILE]
     python -m app.main verify-log
 """
@@ -16,6 +17,7 @@ from pathlib import Path
 from fim import database
 from fim.baseline import BaselineExistsError, create_initial_baseline
 from fim.config import DEFAULT_SETTINGS
+from fim.reporting import ReportError, generate_reports
 from fim.scan_service import NoBaselineError, ScanSummary, run_scan
 from fim.security_log import export_events, verify_chain
 
@@ -101,6 +103,23 @@ def cmd_status(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    formats = ["csv", "json", "pdf"] if args.format == "all" else [args.format]
+    try:
+        paths = generate_reports(
+            DEFAULT_SETTINGS.db_path,
+            DEFAULT_SETTINGS.report_dir,
+            formats,
+            scan_id=args.scan_id,
+        )
+    except ReportError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    for path in paths:
+        print(f"Wrote {path}")
+    return 0
+
+
 def cmd_logs(args: argparse.Namespace) -> int:
     conn = database.connect(DEFAULT_SETTINGS.db_path)
     try:
@@ -170,6 +189,11 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="show the current baseline")
     status.set_defaults(func=cmd_status)
 
+    report = sub.add_parser("report", help="write CSV, JSON, and/or PDF reports")
+    report.add_argument("--scan-id", type=int, default=None, help="scan to report (default: latest)")
+    report.add_argument("--format", choices=["csv", "json", "pdf", "all"], default="all")
+    report.set_defaults(func=cmd_report)
+
     logs = sub.add_parser("logs", help="view or export the security log")
     logs.add_argument("--type", default=None, help="filter by event type, e.g. scan_completed")
     logs.add_argument("--contains", default=None, help="text to search for in event details")
@@ -188,4 +212,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main()) 
