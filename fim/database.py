@@ -226,4 +226,30 @@ def load_security_events(
 
     keys = ("id", "created_at", "event_type", "details", "prev_hash", "entry_hash")
     cur = conn.execute(sql, params)
-    return [dict(zip(keys, row)) for row in cur.fetchall()]
+    return [dict(zip(keys, row)) for row in cur.fetchall()] 
+    
+
+def count_baseline_files(conn: sqlite3.Connection, baseline_id: int) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) FROM baseline_files WHERE baseline_id = ?", (baseline_id,)
+    ).fetchone()
+    return int(row[0])
+
+
+def load_latest_scan(conn: sqlite3.Connection) -> dict | None:
+    row = conn.execute(
+        "SELECT id, started_at, finished_at, baseline_id, files_seen, status "
+        "FROM scans ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    keys = ("id", "started_at", "finished_at", "baseline_id", "files_seen", "status")
+    return dict(zip(keys, row))
+
+
+def count_changes_by_type(conn: sqlite3.Connection, scan_id: int) -> dict[str, int]:
+    cur = conn.execute(
+        "SELECT change_type, COUNT(*) FROM changes WHERE scan_id = ? GROUP BY change_type",
+        (scan_id,),
+    )
+    return {change_type: int(n) for change_type, n in cur.fetchall()}
