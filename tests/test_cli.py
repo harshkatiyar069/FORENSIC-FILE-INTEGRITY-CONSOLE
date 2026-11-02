@@ -53,3 +53,4 @@ def test_update_baseline_requires_exact_phrase(cli):
     assert app_main.main(["update-baseline"]) == 1
     assert app_main.main(["update-baseline", "--confirm", "yes"]) == 1
     assert app_main.main(["update-baseline", "--confirm", BASELINE_UPDATE_PHRASE]) == 0
+
