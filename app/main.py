@@ -6,19 +6,29 @@
     python -m app.main report [--scan-id N] [--format csv|json|pdf|all]
     python -m app.main schedule [--every SECONDS]
     python -m app.main monitor [--quiet SECONDS]
+    python -m app.main update-baseline --confirm "I AUTHORIZE BASELINE UPDATE"
     python -m app.main logs [--type TYPE] [--contains TEXT] [--limit N] [--export FILE]
     python -m app.main verify-log
+    python -m app.main demo
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 from fim import database
-from fim.baseline import BaselineExistsError, create_initial_baseline
+from fim.baseline import (
+    BASELINE_UPDATE_PHRASE,
+    BaselineExistsError,
+    UnauthorizedBaselineUpdate,
+    create_initial_baseline,
+    replace_baseline,
+)
 from fim.config import DEFAULT_SETTINGS
+from fim.demo import run_demo
 from fim.monitor import watch_and_scan
 from fim.reporting import ReportError, generate_reports
 from fim.scan_service import NoBaselineError, ScanSummary, run_scan
@@ -54,6 +64,31 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"  Files failed   : {len(summary.files_failed)}")
     for path, reason in summary.files_failed[:20]:
         print(f"    - {path}: {reason}")
+    return 0
+
+
+def cmd_update_baseline(args: argparse.Namespace) -> int:
+    try:
+        summary = replace_baseline(
+            DEFAULT_SETTINGS.db_path,
+            args.confirm,
+            DEFAULT_SETTINGS,
+            note=args.note,
+        )
+    except UnauthorizedBaselineUpdate as exc:
+        print(f"Refused: {exc}", file=sys.stderr)
+        print(
+            f'To authorize, run: python -m app.main update-baseline --confirm "{BASELINE_UPDATE_PHRASE}"',
+            file=sys.stderr,
+        )
+        return 1
+    except (RuntimeError, FileNotFoundError, NotADirectoryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Baseline #{summary.baseline_id} is now the active baseline.")
+    print(f"  Files recorded : {summary.files_recorded}")
+    print(f"  Files failed   : {len(summary.files_failed)}")
     return 0
 
 
@@ -96,7 +131,7 @@ def _print_summary(summary: ScanSummary) -> None:
 
 def cmd_scan(_args: argparse.Namespace) -> int:
     try:
-        summary = run_scan()
+        summary = run_scan(DEFAULT_SETTINGS.db_path, DEFAULT_SETTINGS)
     except (NoBaselineError, FileNotFoundError, NotADirectoryError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -223,6 +258,16 @@ def cmd_verify(_args: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_demo(_args: argparse.Namespace) -> int:
+    work_dir = Path(tempfile.mkdtemp(prefix="fim-demo-"))
+    print("Running the demo in a separate folder. Your project data is not touched.\n")
+    run_demo(work_dir, say=print)
+    print()
+    print("Demo finished. To open the reports:")
+    print(f"  explorer {work_dir / 'reports'}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fim", description="File Integrity Manager")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -231,6 +276,11 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("folders", nargs="+", help="folders to monitor")
     init.add_argument("--note", default=None, help="optional description")
     init.set_defaults(func=cmd_init)
+
+    update = sub.add_parser("update-baseline", help="replace the trusted baseline (needs authorization)")
+    update.add_argument("--confirm", default=None, help=f'type exactly: "{BASELINE_UPDATE_PHRASE}"')
+    update.add_argument("--note", default=None, help="optional description")
+    update.set_defaults(func=cmd_update_baseline)
 
     scan = sub.add_parser("scan", help="compare current files with the baseline")
     scan.set_defaults(func=cmd_scan)
@@ -260,6 +310,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify = sub.add_parser("verify-log", help="check that the security log has not been altered")
     verify.set_defaults(func=cmd_verify)
+
+    demo = sub.add_parser("demo", help="run the whole platform in a temporary folder")
+    demo.set_defaults(func=cmd_demo)
     return parser
 
 
