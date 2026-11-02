@@ -24,7 +24,7 @@ A Python tool that records trusted SHA-256 fingerprints of files and folders, th
 
 ```powershell
 cd C:\Projects\file-integrity-manager
-py -3.12 -m venv .venv
+py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python -m pytest -v
