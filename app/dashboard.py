@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
-from fim import dashboard_data  # noqa: E402
+from fim import dashboard_data, upload_check  # noqa: E402
 from fim.config import DEFAULT_SETTINGS  # noqa: E402
 from fim.scan_service import NoBaselineError, run_scan  # noqa: E402
 from fim.theme import HERO_HTML, THEME_CSS  # noqa: E402
@@ -107,6 +107,57 @@ if all_events:
         "security-log.json",
         "application/json",
     )
+
+st.subheader("Upload and check a PDF")
+st.caption(
+    "The file stays in memory. It is never saved, opened, or run. "
+    "The check compares it with the baseline and searches its structure as plain text."
+)
+uploaded = st.file_uploader("Choose a PDF to check", type=["pdf"], key="pdf_upload")
+expected_hash = st.text_input(
+    "Optional: paste the SHA-256 you expect (leave blank to skip)", "", key="expected_hash"
+)
+
+if uploaded is not None:
+    result = upload_check.check_upload(
+        DB, uploaded.name, uploaded.getvalue(), expected_hash or None
+    )
+    shown = {"ok": st.success, "info": st.info, "warning": st.warning, "error": st.error}
+    shown[result.severity](result.verdict)
+
+    a, b, c = st.columns(3)
+    a.metric("File size", f"{result.size_bytes / 1024:.1f} KB")
+    b.metric("PDF header", "Valid" if result.looks_like_pdf else "Missing")
+    c.metric("Baseline matches", len(result.baseline_matches))
+
+    st.write("SHA-256 of this file:")
+    st.code(result.sha256, language=None)
+
+    if result.name_matches:
+        st.write("Baseline files with the same name but different content:")
+        for path in result.name_matches:
+            st.write(f"- {path}")
+
+    if result.findings:
+        st.write("Structure scan (text search only, not execution):")
+        st.dataframe(
+            pd.DataFrame([
+                {"severity": f.severity, "finding": f.detail, "occurrences": f.count}
+                for f in result.findings
+            ]),
+            hide_index=True,
+        )
+    else:
+        st.write("No risky PDF features found by the structure scan.")
+
+    st.caption(
+        "A clean result does not prove the file is safe. The scan only searches for known "
+        "keywords, and compressed content can hide them."
+    )
+
+    if st.button("Record this check in the audit trail"):
+        upload_check.record_upload_check(DB, result)
+        st.success("Check recorded in the audit trail.")
 
 st.subheader("Audit trail")
 report = dashboard_data.log_integrity(DB)
